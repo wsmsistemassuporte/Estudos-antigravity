@@ -9,7 +9,7 @@ app.use(cors());
 app.use(express.json());
 
 // Rota de Cadastro
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   const { name, email, password } = req.body;
 
   if (!name || !email || !password) {
@@ -18,8 +18,8 @@ app.post('/api/auth/register', (req, res) => {
 
   try {
     // Verifica se o email já existe
-    const existingUser = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
-    if (existingUser) {
+    const existingUser = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existingUser.rows.length > 0) {
       return res.status(400).json({ error: 'Este e-mail já está cadastrado.' });
     }
 
@@ -27,10 +27,12 @@ app.post('/api/auth/register', (req, res) => {
     const hashedPassword = bcrypt.hashSync(password, 10);
 
     // Insere no banco
-    const stmt = db.prepare('INSERT INTO users (name, email, password) VALUES (?, ?, ?)');
-    const result = stmt.run(name, email, hashedPassword);
+    const result = await db.query(
+      'INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id',
+      [name, email, hashedPassword]
+    );
 
-    const user = { id: result.lastInsertRowid, name, email };
+    const user = { id: result.rows[0].id, name, email };
     res.status(201).json({ user, message: 'Conta criada com sucesso!' });
   } catch (error) {
     console.error('Erro no cadastro:', error);
@@ -39,7 +41,7 @@ app.post('/api/auth/register', (req, res) => {
 });
 
 // Rota de Login
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -48,7 +50,8 @@ app.post('/api/auth/login', (req, res) => {
 
   try {
     // Busca o usuário
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    const userResult = await db.query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = userResult.rows[0];
     
     if (!user) {
       return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
@@ -70,16 +73,17 @@ app.post('/api/auth/login', (req, res) => {
     res.status(500).json({ error: 'Erro interno do servidor.' });
   }
 });
+
 // Rota para listar planos
-app.get('/api/plans', (req, res) => {
+app.get('/api/plans', async (req, res) => {
   const userId = req.query.userId;
   if (!userId) {
     return res.status(400).json({ error: 'ID do usuário é obrigatório.' });
   }
 
   try {
-    const plans = db.prepare('SELECT * FROM plans WHERE user_id = ? ORDER BY created_at DESC').all(userId);
-    res.json(plans);
+    const plansResult = await db.query('SELECT * FROM plans WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+    res.json(plansResult.rows);
   } catch (error) {
     console.error('Erro ao buscar planos:', error);
     res.status(500).json({ error: 'Erro interno do servidor.' });
@@ -87,9 +91,10 @@ app.get('/api/plans', (req, res) => {
 });
 
 // Rota para buscar um plano específico
-app.get('/api/plans/:id', (req, res) => {
+app.get('/api/plans/:id', async (req, res) => {
   try {
-    const plan = db.prepare('SELECT * FROM plans WHERE id = ?').get(req.params.id);
+    const planResult = await db.query('SELECT * FROM plans WHERE id = $1', [req.params.id]);
+    const plan = planResult.rows[0];
     if (!plan) return res.status(404).json({ error: 'Plano não encontrado.' });
     res.json(plan);
   } catch (error) {
@@ -99,10 +104,10 @@ app.get('/api/plans/:id', (req, res) => {
 });
 
 // Rota para excluir um plano específico
-app.delete('/api/plans/:id', (req, res) => {
+app.delete('/api/plans/:id', async (req, res) => {
   try {
-    const result = db.prepare('DELETE FROM plans WHERE id = ?').run(req.params.id);
-    if (result.changes === 0) return res.status(404).json({ error: 'Plano não encontrado.' });
+    const result = await db.query('DELETE FROM plans WHERE id = $1', [req.params.id]);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Plano não encontrado.' });
     res.json({ message: 'Plano excluído com sucesso.' });
   } catch (error) {
     console.error('Erro ao excluir plano:', error);
@@ -176,11 +181,13 @@ app.post('/api/plans/generate', async (req, res) => {
       planContent = `## ${topic}\nInfelizmente o plano gerado não seguiu o formato padrão.\n\nResposta bruta: ${JSON.stringify(generatedData)}`;
     }
 
-    // Salvar o plano no banco de dados SQLite
-    const stmt = db.prepare('INSERT INTO plans (user_id, topic, time_available, plan_content) VALUES (?, ?, ?, ?)');
-    const result = stmt.run(userId, topic, time, planContent.trim());
+    // Salvar o plano no banco de dados Postgres
+    const result = await db.query(
+      'INSERT INTO plans (user_id, topic, time_available, plan_content) VALUES ($1, $2, $3, $4) RETURNING id',
+      [userId, topic, time, planContent.trim()]
+    );
 
-    res.status(201).json({ id: result.lastInsertRowid, message: 'Plano gerado com sucesso!' });
+    res.status(201).json({ id: result.rows[0].id, message: 'Plano gerado com sucesso!' });
   } catch (error) {
     console.error('Erro ao gerar plano:', error);
     
@@ -193,6 +200,13 @@ app.post('/api/plans/generate', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
-});
+
+// Na Vercel (production), não chamamos o app.listen()
+// Apenas exportamos o 'app' para o Serverless rodar
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`Servidor rodando na porta ${PORT}`);
+  });
+}
+
+export default app;
